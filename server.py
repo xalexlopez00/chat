@@ -1,21 +1,22 @@
 import os
 from flask import Flask
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
-# Permitimos que cualquier cliente se conecte
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-@app.route('/')
-def index():
-    return "Servidor de Chat Cifrado Activo", 200
+@socketio.on('join')
+def on_join(data):
+    room = data['room']
+    join_room(room)
+    emit('status', {'msg': f"Alguien entró a la sala: {room}"}, room=room)
 
 @socketio.on('message')
 def handle_message(data):
-    # Reenvía el mensaje cifrado a todos excepto al que lo envió
-    emit('message', data, broadcast=True, include_self=False)
+    # data ahora debe incluir: {'msg': encrypted_data, 'room': room_name}
+    room = data.get('room', 'general')
+    emit('message', data['msg'], room=room, include_self=False)
 
 if __name__ == '__main__':
-    # Render usa la variable PORT
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port)
