@@ -8,12 +8,16 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 @socketio.on('join')
 def on_join(data):
     room = data['room']
-    join_room(room)
-    emit('status', {'msg': f"Alguien entró a la sala: {room}"}, room=room)
+    join_room(room) # Esto mete al usuario en la sala específica
+
+@socketio.on('leave')
+def on_leave(data):
+    room = data['room']
+    leave_room(room) # Esto lo saca
 
 @socketio.on('message')
 def handle_message(data):
-    # data ahora debe incluir: {'msg': encrypted_data, 'room': room_name}
+    # data trae el mensaje cifrado y el nombre de la sala
     room = data.get('room', 'general')
     emit('message', data['msg'], room=room, include_self=False)
 
