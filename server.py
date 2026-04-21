@@ -1,48 +1,28 @@
-import socket
-import threading
-import time
+import os
+from flask import Flask
+from flask_socketio import SocketIO, emit
 
-# --- CONFIGURACIÓN DEL CHAT ---
-CHAT_PORT = 5555
-DISCOVERY_PORT = 5556
+# Creamos la app de Flask necesaria para que Render la reconozca
+app = Flask(__name__)
+# Usamos SocketIO para manejar el chat por WebSockets
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-def discovery_beacon():
-    """Envía un paquete UDP cada 2 segundos anunciando el servidor"""
-    broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    print(f"Anunciando servidor en el puerto UDP {DISCOVERY_PORT}...")
-    while True:
-        # Enviamos un mensaje identificador
-        broadcast_sock.sendto(b"CHAT_SERVER_HERE", ('<broadcast>', DISCOVERY_PORT))
-        time.sleep(2)
+@socketio.on('message')
+def handle_message(encrypted_data):
+    """
+    Recibe el mensaje cifrado de un cliente y lo 
+    reenvía a todos los demás conectados.
+    """
+    print("Mensaje cifrado recibido y reenviado.")
+    emit('message', encrypted_data, broadcast=True, include_self=False)
 
-# --- LÓGICA DEL SERVIDOR DE CHAT (Igual que antes) ---
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind(('0.0.0.0', CHAT_PORT))
-server.listen()
-clients = []
+@app.route('/')
+def health_check():
+    """Ruta necesaria para que Render sepa que el servidor está online"""
+    return "Servidor de Chat Cifrado Online", 200
 
-def broadcast(message, _client):
-    for client in clients:
-        if client != _client:
-            client.send(message)
-
-def handle_client(client):
-    while True:
-        try:
-            message = client.recv(1024)
-            if not message: break
-            broadcast(message, client)
-        except:
-            if client in clients: clients.remove(client)
-            client.close()
-            break
-
-# Lanzar el anuncio automático en un hilo aparte
-threading.Thread(target=discovery_beacon, daemon=True).start()
-
-print(f"Servidor de Chat iniciado en puerto {CHAT_PORT}...")
-while True:
-    client, addr = server.accept()
-    clients.append(client)
-    threading.Thread(target=handle_client, args=(client,)).start()
+if __name__ == '__main__':
+    # Render asigna el puerto mediante la variable de entorno PORT
+    # Si no existe (local), usa el 5000
+    port = int(os.environ.get('PORT', 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
