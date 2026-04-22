@@ -1,20 +1,23 @@
+import eventlet
+eventlet.monkey_patch()  # Vital para que eventlet funcione bien
+
 import os
 import base64
 from flask import Flask
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_socketio import SocketIO, emit, join_room
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Usamos async_mode='eventlet' para máxima estabilidad en Render
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-# --- CONFIGURACIÓN DE SEGURIDAD PARA LOGS (SIFRA COMPATIBLE) ---
-# Cambia esta contraseña por la que quieras usar en SIFRA para abrir los logs
+# --- CONFIGURACIÓN DE SEGURIDAD PARA LOGS ---
 ADMIN_PASSWORD = "chats1234" 
 
 def generar_llave_sifra(password: str):
-    salt = b'\x14\xab\x11\xcd\xfe\xed\x11\x22' # El mismo salt de tu programa
+    salt = b'\x14\xab\x11\xcd\xfe\xed\x11\x22'
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -23,7 +26,6 @@ def generar_llave_sifra(password: str):
     )
     return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
-# Generamos el objeto de cifrado para los logs
 fernet_logs = Fernet(generar_llave_sifra(ADMIN_PASSWORD))
 
 LOG_DIR = "logs"
@@ -32,33 +34,24 @@ if not os.path.exists(LOG_DIR):
 
 def save_encrypted_log(room, message):
     file_path = f"{LOG_DIR}/{room}.txt"
-    # Ciframos el mensaje con la lógica de SIFRA
     encrypted_data = fernet_logs.encrypt(message.encode())
-    
-    # Escribimos en modo binario 'ab' (append binary)
     with open(file_path, "ab") as f:
-        f.write(encrypted_data + b"\n") # Añadimos un salto de línea binario
+        f.write(encrypted_data + b"\n")
 
 # --- LÓGICA DE SALAS Y MENSAJES ---
 
-rooms_db = {"general": None}
-
 @socketio.on('join')
 def on_join(data):
-    room = data['room']
+    room = data.get('room', 'general')
     join_room(room)
-    log_msg = f"[SISTEMA] Usuario unido a {room}"
-    save_encrypted_log(room, log_msg)
+    save_encrypted_log(room, f"[SISTEMA] Usuario unido a {room}")
 
 @socketio.on('message')
 def handle_message(data):
     room = data.get('room', 'general')
-    msg_client = data['msg'] # Este ya viene cifrado por los clientes (AES de chat)
-    
-    # Reenviar a los demás
+    msg_client = data['msg'] 
+    # Reenviar a los demás en la misma sala
     emit('message', msg_client, room=room, include_self=False)
-    
-    # Guardar en log (doble cifrado: el del chat + el de SIFRA para el admin)
     save_encrypted_log(room, f"CHAT_DATA: {msg_client}")
 
 if __name__ == '__main__':
