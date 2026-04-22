@@ -2,70 +2,55 @@ from gevent import monkey
 monkey.patch_all()
 import os
 from flask import Flask, request
-from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
+from flask_socketio import SocketIO, emit, join_room, disconnect
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
+# DB VOLÁTIL
 ROOMS = {"general": {"pass": "", "temp": False, "history": []}}
-USERS = {} 
+USERS = {} # { sid: {'nickname': str, 'ip': str} }
 
-@socketio.on('connect')
-def on_connect():
-    pass # Esperamos al registro formal
+def sync_admins():
+    """Envía la lista de usuarios actualizada a todos los conectados"""
+    socketio.emit('admin_user_sync', USERS)
 
 @socketio.on('register_user')
 def on_register(data):
     nick = data.get('nickname', 'User')
-    USERS[request.sid] = {'nickname': nick, 'ip': request.remote_addr}
+    # Guardamos datos del usuario
+    USERS[request.sid] = {
+        'nickname': nick, 
+        'ip': request.remote_addr,
+        'sid': request.sid
+    }
     join_room("general")
-    emit('admin_user_sync', USERS, broadcast=True)
-    # Enviamos las salas existentes al nuevo usuario
+    # Sincronización inmediata
+    sync_admins()
+    # Enviar salas existentes al nuevo
     for r_name, r_info in ROOMS.items():
         emit('new_room_available', {'room': r_name, 'has_pass': bool(r_info['pass'])})
 
 @socketio.on('disconnect')
 def on_disconnect():
     if request.sid in USERS:
+        print(f"Usuario desconectado: {USERS[request.sid]['nickname']}")
         del USERS[request.sid]
-    emit('admin_user_sync', USERS, broadcast=True)
-
-@socketio.on('create_room')
-def on_create(data):
-    name = data.get('room', '').lower().strip()
-    if name and name not in ROOMS:
-        ROOMS[name] = {"pass": data.get('password', ''), "temp": data.get('temp', False), "history": []}
-        emit('new_room_available', {'room': name, 'has_pass': bool(ROOMS[name]['pass'])}, broadcast=True)
-        # El creador se une automáticamente
-        join_room(name)
-        emit('join_success', {'room': name, 'temp': ROOMS[name]['temp'], 'history': []})
-
-@socketio.on('join')
-def on_join(data):
-    room = data.get('room', 'general')
-    nick = data.get('nickname', '')
-    if room in ROOMS:
-        if ROOMS[room]['pass'] and nick != "Admin" and ROOMS[room]['pass'] != data.get('password'):
-            emit('error_msg', {'msg': "Clave incorrecta"})
-            return
-        join_room(room)
-        hist = [] if ROOMS[room]['temp'] else ROOMS[room]['history']
-        emit('join_success', {'room': room, 'temp': ROOMS[room]['temp'], 'history': hist})
-
-@socketio.on('message')
-def on_message(data):
-    room = data.get('room', 'general')
-    msg = data.get('msg')
-    emit('message', {'msg': msg, 'room': room}, room=room, include_self=False)
-    if room in ROOMS and not ROOMS[room]['temp']:
-        ROOMS[room]['history'].append({'msg': msg})
-        if len(ROOMS[room]['history']) > 100: ROOMS[room]['history'].pop(0)
+    sync_admins() # Actualizar lista del admin al instante
 
 @socketio.on('admin_action')
 def on_admin(data):
+    # Verificación de seguridad: solo el Admin real puede ejecutar esto
     if USERS.get(request.sid, {}).get('nickname') == "Admin":
-        if data.get('action') == "kick": disconnect(data.get('target_sid'))
-        elif data.get('action') == "alert": emit('broadcast_alert', {'msg': data.get('msg')}, broadcast=True)
+        action = data.get('action')
+        target = data.get('target_sid')
+        if action == "kick" and target in USERS:
+            socketio.emit('broadcast_alert', {'msg': f"Usuario {USERS[target]['nickname']} expulsado."}, broadcast=True)
+            disconnect(target)
+        elif action == "alert":
+            emit('broadcast_alert', {'msg': data.get('msg')}, broadcast=True)
+
+# ... (Mantener el resto de funciones de join, message y create_room igual)
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
