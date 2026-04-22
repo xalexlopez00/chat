@@ -8,66 +8,90 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# Configuración
-ROOM_DATA = {"general": {"pass": "", "temp": False}} 
-ROOM_HISTORY = {"general": []} # Guarda los últimos mensajes: [{"msg": "...", "room": "..."}]
-AUTHORIZED_USERS = {} 
+# ESTRUCTURA PROFESIONAL DE DATOS
+# ROOMS: { 'nombre': {'pass': str, 'temp': bool, 'history': list} }
+ROOMS = {
+    "general": {"pass": "", "temp": False, "history": []}
+}
+# AUTH: { sid: [salas_donde_ha_entrado] }
+AUTH_LOG = {}
 
 @socketio.on('connect')
-def handle_connect():
-    AUTHORIZED_USERS[request.sid] = ["general"]
+def on_connect():
+    AUTH_LOG[request.sid] = ["general"]
     join_room("general")
 
 @socketio.on('create_room')
-def handle_create(data):
-    room = data.get('room').lower()
+def on_create(data):
+    name = data.get('room', '').lower().strip()
     password = data.get('password', '')
-    is_temp = data.get('temp', False) 
+    is_temp = data.get('temp', False)
     
-    if room:
-        ROOM_DATA[room] = {"pass": password, "temp": is_temp}
-        ROOM_HISTORY[room] = [] # Inicializar historial para la nueva sala
-        if request.sid in AUTHORIZED_USERS: AUTHORIZED_USERS[request.sid].append(room)
-        join_room(room)
-        emit('join_success', {'room': room, 'temp': is_temp, 'history': []})
-        emit('new_room_available', {'room': room, 'has_pass': password != ""}, broadcast=True)
+    if name and name not in ROOMS:
+        ROOMS[name] = {
+            "pass": password,
+            "temp": is_temp,
+            "history": []
+        }
+        AUTH_LOG[request.sid].append(name)
+        join_room(name)
+        
+        # Confirmación con metadatos
+        emit('join_success', {
+            'room': name, 
+            'temp': is_temp, 
+            'history': []
+        })
+        # Notificación global de nueva sala
+        emit('new_room_available', {
+            'room': name, 
+            'has_pass': bool(password)
+        }, broadcast=True)
 
 @socketio.on('join')
-def handle_join(data):
+def on_join(data):
     room = data.get('room', 'general')
     password = data.get('password', '')
     nickname = data.get('nickname', '')
     
-    info = ROOM_DATA.get(room, {"pass": "", "temp": False})
-    if info["pass"] != "" and nickname != "Admin":
-        if info["pass"] != password:
-            emit('error_msg', {'msg': "Contraseña incorrecta"})
+    if room not in ROOMS:
+        emit('error_msg', {'msg': "La sala no existe"})
+        return
+
+    # Validación Maestra
+    target = ROOMS[room]
+    if target["pass"] and nickname != "Admin":
+        if target["pass"] != password:
+            emit('error_msg', {'msg': "Acceso denegado: Clave incorrecta"})
             return
 
     join_room(room)
-    if room not in AUTHORIZED_USERS[request.sid]:
-        AUTHORIZED_USERS[request.sid].append(room)
+    if room not in AUTH_LOG[request.sid]:
+        AUTH_LOG[request.sid].append(room)
     
-    # ENVIAR EL HISTORIAL DE LA SALA AL USUARIO QUE ENTRA
-    history = ROOM_HISTORY.get(room, [])
-    emit('join_success', {'room': room, 'temp': info["temp"], 'history': history})
+    # Enviar historial solo si no es temporal
+    history_to_send = [] if target["temp"] else target["history"]
+    emit('join_success', {
+        'room': room, 
+        'temp': target["temp"], 
+        'history': history_to_send
+    })
 
 @socketio.on('message')
-def handle_message(data):
+def on_message(data):
     room = data.get('room', 'general')
     msg = data.get('msg')
     
-    if room in AUTHORIZED_USERS.get(request.sid, []):
-        # Enviar a los demás
+    if room in AUTH_LOG.get(request.sid, []):
+        # Reenvío a la sala
         emit('message', {'msg': msg, 'room': room}, room=room, include_self=False)
         
-        # GUARDAR EN EL HISTORIAL DEL SERVIDOR (si no es temporal)
-        if not ROOM_DATA.get(room, {}).get("temp", False):
-            if room not in ROOM_HISTORY: ROOM_HISTORY[room] = []
-            ROOM_HISTORY[room].append({'msg': msg, 'room': room})
-            # Mantener solo los últimos 50 mensajes para no saturar
-            if len(ROOM_HISTORY[room]) > 50:
-                ROOM_HISTORY[room].pop(0)
+        # Guardado en memoria volátil (Historial de sesión)
+        if not ROOMS[room]["temp"]:
+            ROOMS[room]["history"].append({'msg': msg})
+            # Limitar historial a los últimos 100 para eficiencia
+            if len(ROOMS[room]["history"]) > 100:
+                ROOMS[room]["history"].pop(0)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
