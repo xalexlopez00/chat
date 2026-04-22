@@ -1,50 +1,35 @@
 from gevent import monkey
 monkey.patch_all()
-import os
-import time
+import os, time
 from flask import Flask, request
 from flask_socketio import SocketIO, emit, join_room, disconnect
 
 app = Flask(__name__)
-# Configuración de alto rendimiento: Pings frecuentes para que Render no mate la conexión
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', 
-                    ping_timeout=25, ping_interval=10)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', ping_timeout=30)
 
-# --- BASE DE DATOS EN MEMORIA ---
+# DB VOLÁTIL
 ROOMS = {"general": {"pass": "", "temp": False, "history": []}}
-USERS = {} # Estructura: { sid: { nickname, ip, sid, joined, last_active } }
+USERS = {} 
 
-def broadcast_system_state():
-    """Sincroniza salas con usuarios y la tabla maestra con el Admin"""
-    # 1. Metadatos de salas para los clientes (Público)
-    rooms_meta = {n: {"locked": bool(i['pass']), "temp": i['temp']} 
-                 for n, i in ROOMS.items()}
-    socketio.emit('server_sync', {
-        'rooms': rooms_meta, 
-        'user_count': len(USERS)
-    })
-    
-    # 2. Diccionario completo de usuarios para el Admin (Privado)
-    socketio.emit('admin_user_list', USERS)
-
-@socketio.on('connect')
-def handle_connect():
-    print(f"[DEBUG] Conexión física establecida: {request.sid}")
+def sync_all():
+    """Sincronización forzada de todo el ecosistema"""
+    # Para Usuarios: Lista de salas
+    rooms_meta = {n: {"locked": bool(i['pass']), "temp": i['temp']} for n, i in ROOMS.items()}
+    socketio.emit('update_rooms', rooms_meta)
+    # Para Admin: Lista detallada de usuarios
+    socketio.emit('admin_sync_users', USERS)
 
 @socketio.on('register_user')
-def handle_register(data):
-    nick = data.get('nickname', 'User')
-    # Guardamos el perfil completo del usuario
+def handle_reg(data):
+    nick = data.get('nickname', 'Anonymous')
     USERS[request.sid] = {
         'nickname': nick,
         'ip': request.remote_addr,
         'sid': request.sid,
-        'joined': time.strftime('%H:%M:%S'),
-        'status': 'Online'
+        'joined': time.strftime('%H:%M:%S')
     }
     join_room("general")
-    print(f"[AUTH] {nick} se ha registrado con éxito.")
-    broadcast_system_state()
+    sync_all()
 
 @socketio.on('create_room')
 def handle_create(data):
@@ -55,71 +40,47 @@ def handle_create(data):
             "temp": data.get('temp', False),
             "history": []
         }
-        print(f"[ROOM] Sala '{name}' creada.")
-        broadcast_system_state()
+        sync_all()
 
 @socketio.on('join')
 def handle_join(data):
-    room = data.get('room', 'general')
-    pw = data.get('password', '')
-    nick = data.get('nickname', '')
-    
+    room, pw, nick = data.get('room'), data.get('password'), data.get('nickname')
     if room in ROOMS:
-        target = ROOMS[room]
-        # BYPASS DE ADMIN: El Admin entra a cualquier sala sin pass
-        if target['pass'] and nick != "Admin":
-            if target['pass'] != pw:
-                emit('server_error', {'msg': "Contraseña incorrecta."})
+        # BYPASS ADMIN: Si el nick es Admin, entra directo
+        if ROOMS[room]['pass'] and nick != "Admin":
+            if ROOMS[room]['pass'] != pw:
+                emit('error_msg', {'msg': "🔒 Clave incorrecta"})
                 return
-        
         join_room(room)
-        # Enviar historial solo si la sala no es temporal
-        history = [] if target['temp'] else target['history']
-        emit('room_ready', {
-            'room': room,
-            'is_temp': target['temp'],
-            'history': history
-        })
+        # Enviar historial al entrar (si no es temporal)
+        hist = [] if ROOMS[room]['temp'] else ROOMS[room]['history']
+        emit('room_joined', {'room': room, 'history': hist})
 
 @socketio.on('message')
-def handle_message(data):
-    room = data.get('room', 'general')
-    msg = data.get('msg') # El mensaje ya viene encriptado desde el cliente
-    
-    # Reenviar a todos en la sala
-    emit('new_msg', {'msg': msg, 'room': room}, room=room, include_self=False)
-    
-    # Guardar en historial si la sala es permanente
+def handle_msg(data):
+    room, msg = data.get('room'), data.get('msg')
+    # Reenvío a la sala (excepto al que envía para evitar duplicados en UI)
+    emit('new_message', {'msg': msg, 'room': room}, room=room, include_self=False)
+    # Guardar si no es efímero
     if room in ROOMS and not ROOMS[room]['temp']:
         ROOMS[room]['history'].append({'msg': msg})
-        # Mantener historial corto para no saturar la RAM de Render
-        if len(ROOMS[room]['history']) > 50:
-            ROOMS[room]['history'].pop(0)
+        if len(ROOMS[room]['history']) > 50: ROOMS[room]['history'].pop(0)
 
-@socketio.on('admin_action')
+@socketio.on('admin_cmd')
 def handle_admin(data):
-    # Verificación de Seguridad: Solo el socket con nick 'Admin' puede mandar esto
+    # Verificación de capa 7: solo el socket con nick Admin tiene poder
     if USERS.get(request.sid, {}).get('nickname') == "Admin":
-        action = data.get('action')
-        target_sid = data.get('target_sid')
-        
-        if action == "kick" and target_sid in USERS:
-            print(f"[ADMIN] Expulsando a {USERS[target_sid]['nickname']}")
-            socketio.emit('server_error', {'msg': "Has sido expulsado por el Admin."}, room=target_sid)
-            disconnect(target_sid)
-            
+        action, target = data.get('action'), data.get('target_sid')
+        if action == "kick":
+            socketio.emit('error_msg', {'msg': "Expulsado por Admin"}, room=target)
+            disconnect(target)
         elif action == "broadcast":
-            print(f"[ADMIN] Alerta global: {data.get('msg')}")
-            emit('alert', {'msg': data.get('msg')}, broadcast=True)
+            emit('system_alert', {'msg': data.get('msg')}, broadcast=True)
 
 @socketio.on('disconnect')
-def handle_disconnect():
-    if request.sid in USERS:
-        print(f"[QUIT] {USERS[request.sid]['nickname']} se ha desconectado.")
-        del USERS[request.sid]
-    broadcast_system_state()
+def handle_disc():
+    if request.sid in USERS: del USERS[request.sid]
+    sync_all()
 
 if __name__ == '__main__':
-    # Render usa la variable de entorno PORT
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
