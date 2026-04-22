@@ -8,29 +8,30 @@ from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# BASE DE DATOS EN MEMORIA
+# ESTRUCTURA DE DATOS GLOBAL
 # ROOMS: { 'nombre': {'pass': str, 'temp': bool, 'history': list} }
 ROOMS = {"general": {"pass": "", "temp": False, "history": []}}
-USERS = {} # { sid: nickname }
-BANNED_IPS = []
+USERS = {} # { sid: {'nickname': str, 'ip': str} }
 
 @socketio.on('connect')
 def on_connect():
-    if request.remote_addr in BANNED_IPS:
-        return False
-    join_room("general")
+    # El usuario se une a una sala de espera hasta que se registre
+    join_room("waiting_room")
 
 @socketio.on('register_user')
 def on_register(data):
-    nick = data.get('nickname', 'Anónimo')
-    USERS[request.sid] = nick
-    emit('admin_update_users', USERS, broadcast=True)
+    nick = data.get('nickname', 'User')
+    USERS[request.sid] = {'nickname': nick, 'ip': request.remote_addr}
+    leave_room("waiting_room")
+    join_room("general")
+    # Notificar a los admins sobre la actualización de la lista
+    emit('admin_user_sync', USERS, broadcast=True)
 
 @socketio.on('disconnect')
 def on_disconnect():
     if request.sid in USERS:
         del USERS[request.sid]
-    emit('admin_update_users', USERS, broadcast=True)
+    emit('admin_user_sync', USERS, broadcast=True)
 
 @socketio.on('create_room')
 def on_create(data):
@@ -52,43 +53,45 @@ def on_join(data):
     
     if room not in ROOMS: return
 
-    # Bypass para Admin o validación de password
     target = ROOMS[room]
+    # Bypass: Si el usuario es 'Admin', no se valida contraseña
     if target["pass"] and nickname != "Admin":
         if target["pass"] != password:
-            emit('error_msg', {'msg': "Clave incorrecta"})
+            emit('error_msg', {'msg': "Acceso denegado: Clave incorrecta"})
             return
 
     join_room(room)
+    # Si la sala es temporal, enviamos historial vacío
     history = [] if target["temp"] else target["history"]
     emit('join_success', {'room': room, 'temp': target["temp"], 'history': history})
 
 @socketio.on('message')
 def on_message(data):
     room = data.get('room', 'general')
-    msg = data.get('msg')
+    msg = data.get('msg') # Viene cifrado desde el cliente
     
-    # Reenviar mensaje
+    # Emitir a los demás en la sala
     emit('message', {'msg': msg, 'room': room}, room=room, include_self=False)
     
-    # Guardar en historial si no es temporal
+    # Almacenar en historial si no es temporal (Máximo 100 mensajes)
     if room in ROOMS and not ROOMS[room]["temp"]:
         ROOMS[room]["history"].append({'msg': msg})
-        if len(ROOMS[room]["history"]) > 100: ROOMS[room]["history"].pop(0)
+        if len(ROOMS[room]["history"]) > 100:
+            ROOMS[room]["history"].pop(0)
 
-# COMANDOS DE ADMIN
-@socketio.on('admin_command')
-def on_admin_cmd(data):
-    if USERS.get(request.sid) != "Admin": return
+# MODULO DE COMANDOS MAESTROS (Solo para Admin)
+@socketio.on('admin_action')
+def on_admin_action(data):
+    if USERS.get(request.sid, {}).get('nickname') != "Admin": return
     
-    cmd = data.get('cmd')
+    action = data.get('action')
     target_sid = data.get('target_sid')
     
-    if cmd == "kick":
-        socketio.emit('admin_alert', {'msg': "Has sido expulsado por el Admin"}, room=target_sid)
+    if action == "kick":
+        emit('broadcast_alert', {'msg': "SISTEMA: Un usuario ha sido expulsado."}, broadcast=True)
         disconnect(target_sid)
-    elif cmd == "alert":
-        emit('admin_alert', {'msg': data.get('msg')}, broadcast=True)
+    elif action == "alert":
+        emit('broadcast_alert', {'msg': f"AVISO GLOBAL: {data.get('msg')}"}, broadcast=True)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
