@@ -1,9 +1,8 @@
-setuptools
 Flask==2.3.3
-Werkzeug==2.3.7
-Flask-SocketIO==4.3.1
-python-socketio==4.6.1
-python-engineio==3.14.2
-eventlet==0.30.2
-gunicorn==20.1.0
+Flask-SocketIO==5.3.6
+python-socketio==5.10.0
+python-engineio==4.8.0
+gevent==23.9.1
+gevent-websocket==0.10.1
+gunicorn==21.2.0
 cryptography
