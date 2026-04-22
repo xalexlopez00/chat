@@ -10,15 +10,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
-# Configuración de compatibilidad total para evitar errores de protocolo
-socketio = SocketIO(
-    app, 
-    cors_allowed_origins="*", 
-    async_mode='eventlet',
-    allow_upgrades=True,
-    ping_timeout=60,
-    ping_interval=25
-)
+# Configuración ultra-compatible para versiones 4.x
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 ADMIN_PASSWORD = "chats1234" 
 
