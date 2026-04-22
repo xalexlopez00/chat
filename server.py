@@ -1,5 +1,5 @@
-import eventlet
-eventlet.monkey_patch()  # ¡IMPORTANTE! Debe ser la primera línea
+from gevent import monkey
+monkey.patch_all()  # Crucial: Debe ser la primera línea para evitar errores de conexión
 
 import os
 import base64
@@ -11,16 +11,15 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
 
-# Configuración de compatibilidad para protocolos antiguos y nuevos
-# Esto permite que clientes con socketio 4.x conecten sin errores
+# Configuración usando 'gevent' para máxima estabilidad en Render
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
-    async_mode='eventlet',
+    async_mode='gevent',
     manage_session=False
 )
 
-# --- CONFIGURACIÓN DE SEGURIDAD PARA LOGS ---
+# --- SISTEMA DE SEGURIDAD PARA LOGS (OPCIONAL) ---
 ADMIN_PASSWORD = "chats1234" 
 
 def generar_llave_sifra(password: str):
@@ -46,7 +45,7 @@ def save_encrypted_log(room, message):
         with open(file_path, "ab") as f:
             f.write(encrypted_data + b"\n")
     except Exception as e:
-        print(f"Error guardando log: {e}")
+        print(f"Error en log: {e}")
 
 # --- LÓGICA DEL CHAT ---
 
@@ -54,18 +53,19 @@ def save_encrypted_log(room, message):
 def on_join(data):
     room = data.get('room', 'general')
     join_room(room)
-    save_encrypted_log(room, f"[SISTEMA] Usuario unido a la sala: {room}")
+    save_encrypted_log(room, f"[SISTEMA] Conexión en sala: {room}")
 
 @socketio.on('message')
 def handle_message(data):
     room = data.get('room', 'general')
-    msg_client = data['msg'] 
-    # Reenviar el mensaje cifrado a los demás en la sala
-    emit('message', msg_client, room=room, include_self=False)
-    # Guardar en el log del servidor (también cifrado)
-    save_encrypted_log(room, f"CHAT_DATA: {msg_client}")
+    msg_client = data.get('msg')
+    if msg_client:
+        # Reenvía el mensaje a los demás usuarios de la sala
+        emit('message', msg_client, room=room, include_self=False)
+        # Guarda el log cifrado en el servidor
+        save_encrypted_log(room, f"MSG: {msg_client}")
 
 if __name__ == '__main__':
-    # Render asigna el puerto automáticamente
+    # Render configura el puerto automáticamente a través de la variable PORT
     port = int(os.environ.get('PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port)
