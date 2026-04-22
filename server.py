@@ -1,5 +1,5 @@
 import eventlet
-eventlet.monkey_patch()  # Vital para que eventlet funcione bien
+eventlet.monkey_patch()
 
 import os
 import base64
@@ -10,10 +10,16 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
-# Usamos async_mode='eventlet' para máxima estabilidad en Render
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# Configuración de compatibilidad total para evitar errores de protocolo
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='eventlet',
+    allow_upgrades=True,
+    ping_timeout=60,
+    ping_interval=25
+)
 
-# --- CONFIGURACIÓN DE SEGURIDAD PARA LOGS ---
 ADMIN_PASSWORD = "chats1234" 
 
 def generar_llave_sifra(password: str):
@@ -38,8 +44,6 @@ def save_encrypted_log(room, message):
     with open(file_path, "ab") as f:
         f.write(encrypted_data + b"\n")
 
-# --- LÓGICA DE SALAS Y MENSAJES ---
-
 @socketio.on('join')
 def on_join(data):
     room = data.get('room', 'general')
@@ -50,7 +54,6 @@ def on_join(data):
 def handle_message(data):
     room = data.get('room', 'general')
     msg_client = data['msg'] 
-    # Reenviar a los demás en la misma sala
     emit('message', msg_client, room=room, include_self=False)
     save_encrypted_log(room, f"CHAT_DATA: {msg_client}")
 
