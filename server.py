@@ -5,19 +5,22 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
-# Reducimos los tiempos de espera para detectar desconexiones rápido
+# Configuración para evitar "fantasmas" y detectar cierres rápidos
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', 
-                    ping_timeout=10, ping_interval=5)
+                    ping_timeout=15, ping_interval=5)
 
-ROOMS = {"general": {"history": [], "temp": False, "users": set()}}
+ROOMS = {"general": {"history": [], "temp": False, "pass": "", "users": set()}}
 
 def sync_rooms():
-    data = {n: {"temp": i["temp"], "count": len(i["users"])} for n, i in ROOMS.items()}
+    data = {n: {
+        "temp": i["temp"], 
+        "locked": bool(i["pass"]), 
+        "count": len(i["users"])
+    } for n, i in ROOMS.items()}
     socketio.emit('update_rooms', data)
 
 @socketio.on('register_user')
 def handle_reg(data):
-    nick = data.get('nickname', 'Anónimo')
     join_room("general")
     ROOMS["general"]["users"].add(request.sid)
     sync_rooms()
@@ -27,26 +30,39 @@ def handle_reg(data):
 def handle_create(data):
     name = data.get('room', '').lower().strip()
     if name and name not in ROOMS:
-        ROOMS[name] = {"history": [], "temp": data.get('temp', False), "users": set()}
+        ROOMS[name] = {
+            "history": [], 
+            "temp": data.get('temp', False), 
+            "pass": data.get('password', ""), 
+            "users": set()
+        }
         sync_rooms()
 
 @socketio.on('join')
 def handle_join(data):
-    room = data.get('room')
-    old_room = data.get('old_room', 'general')
+    room, pw, nick = data.get('room'), data.get('password', ""), data.get('nickname')
+    old_room = data.get('old_room')
+    
     if room in ROOMS:
-        leave_room(old_room)
-        if request.sid in ROOMS[old_room]["users"]:
+        # Validación de contraseña
+        if ROOMS[room]["pass"] and pw != ROOMS[room]["pass"]:
+            emit('error_msg', {'msg': "Contraseña incorrecta"})
+            return
+            
+        if old_room and request.sid in ROOMS[old_room]["users"]:
+            leave_room(old_room)
             ROOMS[old_room]["users"].remove(request.sid)
         
         join_room(room)
         ROOMS[room]["users"].add(request.sid)
         sync_rooms()
-        emit('room_joined', {'room': room, 'history': ROOMS[room]['history']})
+        # Si es temporal, enviamos historial vacío siempre
+        hist = [] if ROOMS[room]["temp"] else ROOMS[room]["history"]
+        emit('room_joined', {'room': room, 'history': hist})
 
 @socketio.on('message')
 def handle_msg(data):
-    room = data.get('room', 'general')
+    room = data.get('room')
     if room in ROOMS:
         if not ROOMS[room]['temp']:
             ROOMS[room]['history'].append(data)
@@ -54,7 +70,6 @@ def handle_msg(data):
 
 @socketio.on('disconnect')
 def handle_disc():
-    # Limpieza total de fantasmas al cerrar app
     for room in ROOMS.values():
         if request.sid in room["users"]:
             room["users"].remove(request.sid)
