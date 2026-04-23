@@ -2,18 +2,18 @@ from gevent import monkey
 monkey.patch_all()
 import os
 from flask import Flask, request
-from flask_socketio import SocketIO, emit, join_room, leave_room, close_room
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
-# Configuración para detección rápida de desconexiones
+# Configuración para detectar desconexiones en 15 segundos
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', 
                     ping_timeout=15, ping_interval=5)
 
-# ROOMS = { "nombre": {"history": [], "temp": bool, "pass": str, "users": set()} }
+# Estructura: { "nombre": {"history": [], "temp": bool, "pass": str, "users": set()} }
 ROOMS = {"general": {"history": [], "temp": False, "pass": "", "users": set()}}
 
 def sync_rooms():
-    """Envía a todos los clientes la lista actualizada de salas y ocupación"""
+    """Envía la lista de salas y usuarios activos a todos los clientes"""
     data = {n: {
         "temp": i["temp"], 
         "locked": bool(i["pass"]), 
@@ -47,12 +47,12 @@ def handle_join(data):
     old_room = data.get('old_room')
     
     if room in ROOMS:
-        # Validar contraseña si la sala tiene una
+        # Validación de contraseña
         if ROOMS[room]["pass"] and pw != ROOMS[room]["pass"]:
             emit('error_msg', {'msg': "🔒 Contraseña incorrecta"})
             return
             
-        # Salir de la sala anterior limpiamente
+        # Salida limpia de la sala anterior
         if old_room and old_room in ROOMS:
             leave_room(old_room)
             if request.sid in ROOMS[old_room]["users"]:
@@ -62,7 +62,7 @@ def handle_join(data):
         ROOMS[room]["users"].add(request.sid)
         sync_rooms()
         
-        # Si la sala es temporal, el historial enviado siempre es vacío
+        # Si es temporal, no enviamos historial
         hist = [] if ROOMS[room]["temp"] else ROOMS[room]["history"]
         emit('room_joined', {'room': room, 'history': hist})
 
@@ -70,7 +70,7 @@ def handle_join(data):
 def handle_msg(data):
     room = data.get('room')
     if room in ROOMS:
-        # Solo guardar si la sala NO es temporal
+        # Solo guardar si NO es temporal
         if not ROOMS[room]['temp']:
             ROOMS[room]['history'].append(data)
             if len(ROOMS[room]['history']) > 50: ROOMS[room]['history'].pop(0)
@@ -79,12 +79,11 @@ def handle_msg(data):
 
 @socketio.on('disconnect')
 def handle_disc():
-    """Elimina al usuario de cualquier sala para evitar 'fantasmas'"""
-    for room_name, room_data in ROOMS.items():
+    """Limpieza de 'fantasmas' al cerrar la app"""
+    for room_data in ROOMS.values():
         if request.sid in room_data["users"]:
             room_data["users"].remove(request.sid)
     sync_rooms()
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
