@@ -1,77 +1,84 @@
-from gevent import monkey
-monkey.patch_all()
 import os
-from flask import Flask, request, send_from_directory
+import time
+import base64
+import asyncio
+import logging
+import threading
+from flask import Flask, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.fernet import Fernet
+import discord
+
+# --- CONFIGURACIÓN ---
+DISCORD_TOKEN = "TU_TOKEN_AQUÍ"
+GUILD_ID = 123456789  # ID de tu servidor de Discord
+CATEGORY_NAME = "chatapp"
+CIFRA_PASS = "chats123"
+MSG_LIMIT = 100
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("GHOST_CORE")
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*")
+client = discord.Client(intents=discord.Intents.all())
 
-# Almacén de salas
-ROOMS = {"general": {"history": [], "temp": False, "pass": "", "users": set()}}
+ROOMS_MANAGER = {}
 
-# Ruta para el icono en la web (Favicon)
-@app.route('/favicon.ico')
-def favicon():
-    return send_from_directory(os.path.join(app.root_path, 'static'),
-                               'favicon.ico', mimetype='image/vnd.microsoft.icon')
+# --- LÓGICA SIFRA V7 ---
+def generar_llave_sifra(password: str):
+    salt = b'\x14\xab\x11\xcd\xfe\xed\x11\x22'
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
-def sync_rooms():
-    data = {n: {
-        "temp": i["temp"], 
-        "locked": bool(i["pass"]), 
-        "count": len(i["users"])
-    } for n, i in ROOMS.items()}
-    socketio.emit('update_rooms', data)
+cipher_suite = Fernet(generar_llave_sifra(CIFRA_PASS))
 
-@socketio.on('register_user')
-def handle_reg(data):
-    join_room("general")
-    ROOMS["general"]["users"].add(request.sid)
-    sync_rooms()
-    emit('room_joined', {'room': 'general', 'history': ROOMS['general']['history']})
+# --- DISCORD LOGIC ---
+async def setup_channel(room_name):
+    guild = client.get_guild(GUILD_ID)
+    cat = discord.utils.get(guild.categories, name=CATEGORY_NAME) or await guild.create_category(CATEGORY_NAME)
+    chan = discord.utils.get(cat.text_channels, name=room_name.lower()) or await guild.create_text_channel(room_name.lower(), category=cat)
+    return chan.id
 
-@socketio.on('create_room')
-def handle_create(data):
-    name = data.get('room', '').lower().strip()
-    if name and name not in ROOMS:
-        ROOMS[name] = {
-            "history": [], 
-            "temp": data.get('temp', False), 
-            "pass": data.get('password', ""), 
-            "users": set()
-        }
-        sync_rooms()
-
-@socketio.on('join')
-def handle_join(data):
-    room = data.get('room')
-    pw = data.get('password', "")
-    old_room = data.get('old_room')
+async def send_vault(room_name, messages):
+    channel = client.get_channel(ROOMS_MANAGER[room_name]['discord_id'])
+    raw_text = f"SALA: {room_name}\n" + "\n".join([f"[{time.ctime()}] {m['user']}: {m['msg']}" for m in messages])
+    encrypted = cipher_suite.encrypt(raw_text.encode())
     
-    if room in ROOMS:
-        if ROOMS[room]["pass"] and pw != ROOMS[room]["pass"]:
-            emit('error_msg', {'msg': "🔒 Contraseña incorrecta"})
-            return
-            
-        if old_room and old_room in ROOMS:
-            leave_room(old_room)
-            if request.sid in ROOMS[old_room]["users"]:
-                ROOMS[old_room]["users"].remove(request.sid)
-        
-        join_room(room)
-        ROOMS[room]["users"].add(request.sid)
-        sync_rooms()
-        hist = [] if ROOMS[room]["temp"] else ROOMS[room]["history"]
-        emit('room_joined', {'room': room, 'history': hist})
+    fname = f"vault_{room_name}_{int(time.time())}.txt"
+    with open(fname, "wb") as f: f.write(encrypted)
+    await channel.send(content=f"📦 **BÓVEDA SIFRA V7 SELLADA** (100 msgs)", file=discord.File(fname))
+    os.remove(fname)
+
+# --- SOCKET EVENTS ---
+@socketio.on('create_room')
+def on_create(data):
+    room = data.get('room', '').lower().strip()
+    if room and room not in ROOMS_MANAGER:
+        fut = asyncio.run_coroutine_threadsafe(setup_channel(room), client.loop)
+        ROOMS_MANAGER[room] = {'count': 0, 'discord_id': fut.result(), 'buffer': [], 'history': []}
+        socketio.emit('update_rooms', {n: {"locked": False} for n in ROOMS_MANAGER})
 
 @socketio.on('message')
-def handle_msg(data):
-    room = data.get('room')
-    if room in ROOMS:
-        if not ROOMS[room]['temp']:
-            ROOMS[room]['history'].append(data)
-        emit('new_message', data, room=room, include_self=False)
+def on_msg(data):
+    r = data.get('room')
+    if r in ROOMS_MANAGER:
+        ROOMS_MANAGER[r]['buffer'].append(data)
+        ROOMS_MANAGER[r]['count'] += 1
+        if ROOMS_MANAGER[r]['count'] >= MSG_LIMIT:
+            batch = ROOMS_MANAGER[r]['buffer'].copy()
+            ROOMS_MANAGER[r]['buffer'] = []
+            ROOMS_MANAGER[r]['count'] = 0
+            asyncio.run_coroutine_threadsafe(send_vault(r, batch), client.loop)
+        emit('new_message', data, room=r, include_self=False)
+
+@socketio.on('join')
+def on_join(data):
+    join_room(data['room'])
+    emit('room_joined', {'room': data['room'], 'history': []})
 
 if __name__ == '__main__':
+    threading.Thread(target=lambda: client.run(DISCORD_TOKEN), daemon=True).start()
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
