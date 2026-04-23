@@ -1,91 +1,64 @@
 from gevent import monkey
 monkey.patch_all()
-import os, time
+import os
 from flask import Flask, request
-from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
-# Configuración de latencia ultra-baja
+# Reducimos los tiempos de espera para detectar desconexiones rápido
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', 
-                    ping_timeout=60, ping_interval=25)
+                    ping_timeout=10, ping_interval=5)
 
-# DATABASE EN MEMORIA (OPTIMIZADA)
-STATE = {
-    "rooms": {
-        "general": {"pass": "", "temp": False, "history": [], "users": 0}
-    },
-    "clients": {} # sid: {nickname, room}
-}
+ROOMS = {"general": {"history": [], "temp": False, "users": set()}}
 
-def sync_all():
-    """Sincronización selectiva: Salas para todos, perfiles para Admin"""
-    rooms_meta = {n: {"locked": bool(i['pass']), "temp": i['temp'], "active": i['users']} 
-                 for n, i in STATE['rooms'].items()}
-    socketio.emit('update_rooms', rooms_meta)
+def sync_rooms():
+    data = {n: {"temp": i["temp"], "count": len(i["users"])} for n, i in ROOMS.items()}
+    socketio.emit('update_rooms', data)
 
 @socketio.on('register_user')
 def handle_reg(data):
-    nick = data.get('nickname', 'User')
-    STATE['clients'][request.sid] = {'nickname': nick, 'room': 'general'}
-    join_room('general')
-    STATE['rooms']['general']['users'] += 1
-    sync_all()
+    nick = data.get('nickname', 'Anónimo')
+    join_room("general")
+    ROOMS["general"]["users"].add(request.sid)
+    sync_rooms()
+    emit('room_joined', {'room': 'general', 'history': ROOMS['general']['history']})
 
 @socketio.on('create_room')
 def handle_create(data):
     name = data.get('room', '').lower().strip()
-    if name and name not in STATE['rooms']:
-        STATE['rooms'][name] = {
-            "pass": data.get('password', ''),
-            "temp": data.get('temp', False),
-            "history": [],
-            "users": 0
-        }
-        sync_all()
+    if name and name not in ROOMS:
+        ROOMS[name] = {"history": [], "temp": data.get('temp', False), "users": set()}
+        sync_rooms()
 
 @socketio.on('join')
 def handle_join(data):
-    new_room = data.get('room')
-    pw = data.get('password', '')
-    client = STATE['clients'].get(request.sid)
-    
-    if new_room in STATE['rooms'] and client:
-        # Bypass de seguridad para el Admin
-        if STATE['rooms'][new_room]['pass'] and client['nickname'] != "Admin":
-            if STATE['rooms'][new_room]['pass'] != pw:
-                emit('error_msg', {'msg': "🔒 Acceso Denegado"})
-                return
+    room = data.get('room')
+    old_room = data.get('old_room', 'general')
+    if room in ROOMS:
+        leave_room(old_room)
+        if request.sid in ROOMS[old_room]["users"]:
+            ROOMS[old_room]["users"].remove(request.sid)
         
-        # Salir de la sala anterior
-        old_room = client['room']
-        STATE['rooms'][old_room]['users'] -= 1
-        
-        # Entrar a la nueva
-        client['room'] = new_room
-        join_room(new_room)
-        STATE['rooms'][new_room]['users'] += 1
-        
-        hist = [] if STATE['rooms'][new_room]['temp'] else STATE['rooms'][new_room]['history']
-        emit('room_joined', {'room': new_room, 'history': hist})
-        sync_all()
+        join_room(room)
+        ROOMS[room]["users"].add(request.sid)
+        sync_rooms()
+        emit('room_joined', {'room': room, 'history': ROOMS[room]['history']})
 
 @socketio.on('message')
 def handle_msg(data):
-    room = data.get('room')
-    if room in STATE['rooms']:
+    room = data.get('room', 'general')
+    if room in ROOMS:
+        if not ROOMS[room]['temp']:
+            ROOMS[room]['history'].append(data)
         emit('new_message', data, room=room, include_self=False)
-        if not STATE['rooms'][room]['temp']:
-            STATE['rooms'][room]['history'].append(data)
-            if len(STATE['rooms'][room]['history']) > 50: STATE['rooms'][room]['history'].pop(0)
 
 @socketio.on('disconnect')
-def handle_exit():
-    if request.sid in STATE['clients']:
-        room = STATE['clients'][request.sid]['room']
-        if room in STATE['rooms']:
-            STATE['rooms'][room]['users'] -= 1
-        del STATE['clients'][request.sid]
-        sync_all()
+def handle_disc():
+    # Limpieza total de fantasmas al cerrar app
+    for room in ROOMS.values():
+        if request.sid in room["users"]:
+            room["users"].remove(request.sid)
+    sync_rooms()
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
