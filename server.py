@@ -28,7 +28,6 @@ def handle_reg(data):
 @socketio.on('create_room')
 def handle_create(data):
     name = data.get('room', '').lower().strip()
-    # Ahora permite crear la sala aunque no se envíe contraseña
     if name and name not in ROOMS:
         ROOMS[name] = {
             "history": [], 
@@ -40,20 +39,14 @@ def handle_create(data):
 
 @socketio.on('join')
 def handle_join(data):
-    room = data.get('room')
-    pw = data.get('password', "")
-    old_room = data.get('old_room')
-    
+    room, pw, old_room = data.get('room'), data.get('password', ""), data.get('old_room')
     if room in ROOMS:
         if ROOMS[room]["pass"] and pw != ROOMS[room]["pass"]:
             emit('error_msg', {'msg': "🔒 Contraseña incorrecta"})
             return
-            
         if old_room and old_room in ROOMS:
             leave_room(old_room)
-            if request.sid in ROOMS[old_room]["users"]:
-                ROOMS[old_room]["users"].remove(request.sid)
-        
+            if request.sid in ROOMS[old_room]["users"]: ROOMS[old_room]["users"].remove(request.sid)
         join_room(room)
         ROOMS[room]["users"].add(request.sid)
         sync_rooms()
@@ -64,17 +57,8 @@ def handle_join(data):
 def handle_msg(data):
     room = data.get('room')
     if room in ROOMS:
-        if not ROOMS[room]['temp']:
-            ROOMS[room]['history'].append(data)
-            if len(ROOMS[room]['history']) > 50: ROOMS[room]['history'].pop(0)
+        if not ROOMS[room]['temp']: ROOMS[room]['history'].append(data)
         emit('new_message', data, room=room, include_self=False)
-
-@socketio.on('disconnect')
-def handle_disc():
-    for room_data in ROOMS.values():
-        if request.sid in room_data["users"]:
-            room_data.get("users").remove(request.sid)
-    sync_rooms()
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
