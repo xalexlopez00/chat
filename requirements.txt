@@ -1,23 +1,12 @@
-# Núcleo del Servidor Web
-Flask==2.3.3
-Flask-SocketIO==5.3.6
-python-socketio==5.10.0
-python-engineio==4.8.0
-
-# Motor Asíncrono y Servidor de Producción (Render)
-gevent==23.9.1
-gevent-websocket==0.10.1
-gunicorn==21.2.0
-
-# Seguridad y Cifrado
-cryptography==42.0.5
-
-# Integración con Discord (La que faltaba)
-discord.py==2.3.2
-
-# Procesamiento de Imágenes e Iconos
-Pillow==10.2.0
-
-# Utilidades y Compatibilidad
-requests==2.31.0
+flask
+flask-socketio
+python-socketio
+python-engineio
+gevent
+gevent-websocket
+gunicorn
+cryptography
+discord.py
+Pillow
+requests
 setuptools
