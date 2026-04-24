@@ -6,10 +6,11 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
 
 app = Flask(__name__)
+# Configuración para Render/Despliegue
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# Memoria de salas
-ROOMS = {"general": {"history": [], "users": set(), "owner": "SISTEMA"}}
+# Memoria volátil de salas
+ROOMS = {"general": {"history": [], "users": set()}}
 
 @socketio.on('register_user')
 def handle_reg(data):
@@ -21,12 +22,12 @@ def handle_reg(data):
 def handle_msg(data):
     room = data.get('room')
     if room in ROOMS:
-        # Guardar en historial
+        # Guardar mensaje en el historial del servidor (máximo 50)
         ROOMS[room]['history'].append(data)
-        if len(ROOMS[room]['history']) > 50: ROOMS[room]['history'].pop(0)
+        if len(ROOMS[room]['history']) > 50:
+            ROOMS[room]['history'].pop(0)
         
-        # IMPORTANTE: No enviar al emisor (include_self=False)
-        # Esto evita el bucle "Tú: SISTEMA: Tú"
+        # REENVÍO CRÍTICO: include_self=False evita el bucle de "SISTEMA: Tú"
         emit('new_message', data, room=room, include_self=False)
 
 @socketio.on('join')
