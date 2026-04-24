@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
+# Optimizamos el async_mode para despliegues como Render
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 # --- CONFIGURACIÓN SEGURA ---
@@ -37,7 +38,6 @@ def discord_api(method, endpoint, data=None, files=None):
         if method == "POST": 
             return requests.post(url, headers=headers, json=data, files=files, timeout=5).json()
     except Exception as e:
-        print(f"Error Discord API: {e}")
         return None
 
 def setup_discord_channel(room_name):
@@ -60,10 +60,11 @@ def setup_discord_channel(room_name):
         return channel['id']
     except: return None
 
-# Memoria del servidor (Añadido 'owner' a la estructura)
+# Memoria del servidor
 ROOMS = {"general": {"history": [], "temp": False, "pass": "", "users": set(), "msg_count": 0, "owner": "SISTEMA"}}
 
 def sync_rooms():
+    # Enviamos la lista actualizada de salas a todos los clientes
     data = {n: {"temp": i["temp"], "locked": bool(i["pass"]), "count": len(i["users"])} for n, i in ROOMS.items()}
     socketio.emit('update_rooms', data)
 
@@ -72,6 +73,7 @@ def handle_reg(data):
     join_room("general")
     ROOMS["general"]["users"].add(request.sid)
     sync_rooms()
+    # Enviamos historial para que el chat no aparezca vacío al entrar
     emit('room_joined', {'room': 'general', 'history': ROOMS['general']['history']})
 
 @socketio.on('create_room')
@@ -84,7 +86,7 @@ def handle_create(data):
             "pass": data.get('password', ""), 
             "users": set(), 
             "msg_count": 0,
-            "owner": request.sid # Guardamos el ID de quien la creó
+            "owner": request.sid 
         }
         sync_rooms()
 
@@ -100,6 +102,7 @@ def handle_join(data):
         if old_room and old_room in ROOMS:
             leave_room(old_room)
             ROOMS[old_room]["users"].discard(request.sid)
+        
         join_room(room)
         ROOMS[room]["users"].add(request.sid)
         sync_rooms()
@@ -108,30 +111,41 @@ def handle_join(data):
 @socketio.on('message')
 def handle_msg(data):
     room = data.get('room')
+    user = data.get('user')
     if room in ROOMS:
+        # Solo guardamos en historial si no es una sala temporal
         if not ROOMS[room]['temp']:
             ROOMS[room]['history'].append(data)
             ROOMS[room]['msg_count'] += 1
             if len(ROOMS[room]['history']) > 100:
                 ROOMS[room]['history'].pop(0)
         
+        # IMPORTANTE: include_self=False para que no recibas tu propio mensaje del servidor
+        # El cliente ya lo pinta solo al darle a "Enviar"
         emit('new_message', data, room=room, include_self=False)
+        
+        # Proceso de Discord en segundo plano para no ralentizar el chat
         socketio.start_background_task(process_discord_integration, room, data)
 
-# --- NUEVA FUNCIÓN: CERRAR SALA ---
 @socketio.on('close_room')
 def handle_close(data):
     room = data.get('room')
-    # Solo el dueño (owner) puede cerrar la sala y no puede cerrar la sala 'general'
     if room in ROOMS and room != "general":
         if ROOMS[room]['owner'] == request.sid:
-            # Notificar a los usuarios para que salgan antes de borrar
             emit('room_closed', {'room': room}, room=room)
-            # Borrar de memoria
             del ROOMS[room]
             sync_rooms()
 
+@socketio.on('disconnect')
+def handle_disconnect():
+    # Limpiar al usuario de todas las salas donde estaba
+    for r_name, r_data in ROOMS.items():
+        if request.sid in r_data["users"]:
+            r_data["users"].discard(request.sid)
+    sync_rooms()
+
 def process_discord_integration(room, data):
+    if room not in ROOMS: return
     channel_id = setup_discord_channel(room)
     if not channel_id: return
 
@@ -142,19 +156,16 @@ def process_discord_integration(room, data):
         "content": f"🔒 **GHOST_PACKET:** `{discord_cipher_text}`"
     })
 
-    if ROOMS.get(room) and ROOMS[room]['msg_count'] >= 100:
+    if ROOMS[room]['msg_count'] >= 100:
         try:
             content = "\n".join([f"{m['user']}: {m['msg']}" for m in ROOMS[room]['history']])
             enc_data = encrypt_backup(content) 
-            
             files = {'file': ('registro_cifrado.txt', enc_data)}
             discord_api("POST", f"/channels/{channel_id}/messages", 
                         data={"content": "📦 **BACKUP GENERADO (AES-256)**\nClave: `chats123`"},
                         files=files)
-            
             ROOMS[room]['msg_count'] = 0 
-        except Exception as e:
-            print(f"Error en backup: {e}")
+        except: pass
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
