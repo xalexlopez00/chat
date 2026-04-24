@@ -13,20 +13,20 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
-# Importante: Permitir CORS y usar gevent para que no se cuelgue en Render
+# Permitir CORS y usar gevent para evitar cuelgues en Render
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN SEGURA ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID") 
 CATEGORY_NAME = "CHAT_GHOST"
 
-# Lógica para cifrar el archivo de backup (Contraseña fija para recuperación)
+# 1. Función para cifrar Backups y Discord (Contraseña: chats123)
 def encrypt_backup(text):
     salt = b'\x14\xab\x11\xcd\xfe\xed\x11\x22'
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
     key = base64.urlsafe_b64encode(kdf.derive(b"chats123"))
-    return Fernet(key).encrypt(text.encode())
+    return Fernet(key).encrypt(text.encode()) # Devuelve bytes para archivos o .decode() para texto
 
 def discord_api(method, endpoint, data=None, files=None):
     if not DISCORD_TOKEN: return None
@@ -48,12 +48,10 @@ def setup_discord_channel(room_name):
         channels = discord_api("GET", f"/guilds/{GUILD_ID}/channels")
         if not isinstance(channels, list): return None
         
-        # 1. Buscar o crear categoría
-        category = next((c for c in channels if c.get('name', '').upper() == CATEGORY_NAME), None)
+        category = next((c for c in channels if str(c.get('name', '')).upper() == CATEGORY_NAME), None)
         if not category:
             category = discord_api("POST", f"/guilds/{GUILD_ID}/channels", {"name": CATEGORY_NAME, "type": 4})
 
-        # 2. Buscar o crear canal
         channel_name = room_name.lower().replace(" ", "_")
         channel = next((c for c in channels if c.get('name') == channel_name), None)
         
@@ -64,18 +62,13 @@ def setup_discord_channel(room_name):
         return channel['id']
     except: return None
 
-# Memoria del servidor (Volátil)
-# Estructura: {nombre: {history: [], temp: bool, pass: str, users: set, msg_count: int}}
+# Memoria del servidor
 ROOMS = {"general": {"history": [], "temp": False, "pass": "", "users": set(), "msg_count": 0}}
 
 def sync_rooms():
-    # Enviamos solo la info necesaria al cliente
-    data = {n: {"locked": bool(i["pass"]), "count": len(i["users"])} for n, i in ROOMS.items()}
+    # Sincroniza estados de salas y candados con el cliente
+    data = {n: {"temp": i["temp"], "locked": bool(i["pass"]), "count": len(i["users"])} for n, i in ROOMS.items()}
     socketio.emit('update_rooms', data)
-
-@socketio.on('connect')
-def on_connect():
-    sync_rooms()
 
 @socketio.on('register_user')
 def handle_reg(data):
@@ -89,11 +82,8 @@ def handle_create(data):
     name = data.get('room', '').lower().strip().replace(" ", "_")
     if name and name not in ROOMS:
         ROOMS[name] = {
-            "history": [], 
-            "temp": data.get('temp', False), 
-            "pass": data.get('password', ""), 
-            "users": set(), 
-            "msg_count": 0
+            "history": [], "temp": data.get('temp', False), 
+            "pass": data.get('password', ""), "users": set(), "msg_count": 0
         }
         sync_rooms()
 
@@ -102,61 +92,59 @@ def handle_join(data):
     room = data.get('room')
     old_room = data.get('old_room')
     password = data.get('password', "")
-    
     if room in ROOMS:
-        # Validación de contraseña
         if ROOMS[room]["pass"] and ROOMS[room]["pass"] != password:
-            emit('new_message', {'user': 'SISTEMA', 'msg': 'eN0rcmptZWRfa2V5...'}, room=request.sid) # Opcional: mensaje cifrado de error
+            emit('error_msg', {'msg': 'Clave incorrecta'})
             return
-            
         if old_room and old_room in ROOMS:
             leave_room(old_room)
             ROOMS[old_room]["users"].discard(request.sid)
-        
         join_room(room)
         ROOMS[room]["users"].add(request.sid)
         sync_rooms()
-        # Enviar historial al entrar
         emit('room_joined', {'room': room, 'history': ROOMS[room]['history']})
 
 @socketio.on('message')
 def handle_msg(data):
     room = data.get('room')
     if room in ROOMS:
-        # 1. Guardar en historial si NO es efímera
+        # Guardar en historial si no es efímera
         if not ROOMS[room]['temp']:
             ROOMS[room]['history'].append(data)
             ROOMS[room]['msg_count'] += 1
-            # Mantener máximo 100 mensajes en memoria RAM
             if len(ROOMS[room]['history']) > 100:
                 ROOMS[room]['history'].pop(0)
         
-        # 2. Reenviar a los demás (cifrado tal cual llega)
+        # Reenvío a clientes
         emit('new_message', data, room=room, include_self=False)
 
-        # 3. Notificar a Discord (en segundo plano)
+        # Integración Discord en segundo plano
         socketio.start_background_task(process_discord_integration, room, data)
 
 def process_discord_integration(room, data):
     channel_id = setup_discord_channel(room)
     if not channel_id: return
 
-    # Enviar mensaje normal a Discord
-    discord_api("POST", f"/channels/{channel_id}/messages", {"content": f"**{data['user']}**: `{data['msg']}`"})
+    # 2. Cifrar mensaje individual para Discord (No más texto plano)
+    raw_log = f"{data['user']}: {data['msg']}"
+    discord_cipher_text = encrypt_backup(raw_log).decode() # Usamos la misma lógica chats123
+    
+    discord_api("POST", f"/channels/{channel_id}/messages", {
+        "content": f"🔒 **GHOST_PACKET:** `{discord_cipher_text}`"
+    })
 
-    # 4. Backup automático si llega a 100 mensajes nuevos
+    # 3. Backup automático cada 100 mensajes
     if ROOMS[room]['msg_count'] >= 100:
         try:
             content = "\n".join([f"{m['user']}: {m['msg']}" for m in ROOMS[room]['history']])
-            enc_data = encrypt_backup(content)
+            enc_data = encrypt_backup(content) # Devuelve los bytes cifrados
             
-            # Subir archivo cifrado a Discord
-            files = {'file': ('backup_cifrado.ghost', enc_data)}
+            files = {'file': ('registro_cifrado.txt', enc_data)}
             discord_api("POST", f"/channels/{channel_id}/messages", 
-                        data={"content": "📦 **NIVEL DE SEGURIDAD MÁXIMO: Backup Cifrado Generado.**\nClave de recuperación: `chats123`"}, 
+                        data={"content": "📦 **BACKUP GENERADO (AES-256)**\nPassword: `chats123`"},
                         files=files)
             
-            ROOMS[room]['msg_count'] = 0 # Reiniciar contador
+            ROOMS[room]['msg_count'] = 0 
         except Exception as e:
             print(f"Error en backup: {e}")
 
