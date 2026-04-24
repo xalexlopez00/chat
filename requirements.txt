@@ -10,3 +10,4 @@ discord.py
 Pillow
 requests
 setuptools
+customtkinter
