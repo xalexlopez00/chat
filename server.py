@@ -13,7 +13,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+# Configuración optimizada para Render y Gevent
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent', ping_timeout=60)
 
 # --- CONFIGURACIÓN SEGURA ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -21,6 +22,7 @@ GUILD_ID = os.getenv("GUILD_ID")
 CATEGORY_NAME = "CHAT_GHOST"
 
 def encrypt_backup(text):
+    """Cifrado para logs de Discord y Backups"""
     salt = b'\x14\xab\x11\xcd\xfe\xed\x11\x22'
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
     key = base64.urlsafe_b64encode(kdf.derive(b"chats123"))
@@ -37,7 +39,7 @@ def discord_api(method, endpoint, data=None, files=None):
         if method == "POST": 
             return requests.post(url, headers=headers, json=data, files=files, timeout=5).json()
     except Exception as e:
-        print(f"Error Discord API: {e}")
+        print(f"DEBUG: Discord API Error -> {e}")
         return None
 
 def setup_discord_channel(room_name):
@@ -60,10 +62,11 @@ def setup_discord_channel(room_name):
         return channel['id']
     except: return None
 
-# Memoria del servidor (Añadido 'owner' a la estructura)
+# Memoria del servidor
 ROOMS = {"general": {"history": [], "temp": False, "pass": "", "users": set(), "msg_count": 0, "owner": "SISTEMA"}}
 
 def sync_rooms():
+    """Notifica a todos los clientes los cambios en las salas disponibles"""
     data = {n: {"temp": i["temp"], "locked": bool(i["pass"]), "count": len(i["users"])} for n, i in ROOMS.items()}
     socketio.emit('update_rooms', data)
 
@@ -73,6 +76,13 @@ def handle_reg(data):
     ROOMS["general"]["users"].add(request.sid)
     sync_rooms()
     emit('room_joined', {'room': 'general', 'history': ROOMS['general']['history']})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Limpiar al usuario de todas las salas al desconectarse"""
+    for room in ROOMS.values():
+        room["users"].discard(request.sid)
+    sync_rooms()
 
 @socketio.on('create_room')
 def handle_create(data):
@@ -84,7 +94,7 @@ def handle_create(data):
             "pass": data.get('password', ""), 
             "users": set(), 
             "msg_count": 0,
-            "owner": request.sid # Guardamos el ID de quien la creó
+            "owner": request.sid 
         }
         sync_rooms()
 
@@ -97,9 +107,11 @@ def handle_join(data):
         if ROOMS[room]["pass"] and ROOMS[room]["pass"] != password:
             emit('error_msg', {'msg': 'Clave incorrecta'})
             return
+        
         if old_room and old_room in ROOMS:
             leave_room(old_room)
             ROOMS[old_room]["users"].discard(request.sid)
+            
         join_room(room)
         ROOMS[room]["users"].add(request.sid)
         sync_rooms()
@@ -115,23 +127,24 @@ def handle_msg(data):
             if len(ROOMS[room]['history']) > 100:
                 ROOMS[room]['history'].pop(0)
         
+        # Enviamos a todos en la sala EXCEPTO al emisor (él ya lo imprimió localmente)
         emit('new_message', data, room=room, include_self=False)
         socketio.start_background_task(process_discord_integration, room, data)
 
-# --- NUEVA FUNCIÓN: CERRAR SALA ---
 @socketio.on('close_room')
 def handle_close(data):
     room = data.get('room')
-    # Solo el dueño (owner) puede cerrar la sala y no puede cerrar la sala 'general'
     if room in ROOMS and room != "general":
         if ROOMS[room]['owner'] == request.sid:
-            # Notificar a los usuarios para que salgan antes de borrar
             emit('room_closed', {'room': room}, room=room)
-            # Borrar de memoria
             del ROOMS[room]
             sync_rooms()
 
 def process_discord_integration(room, data):
+    """Maneja el log cifrado a Discord y Backups automáticos"""
+    # Verificación de seguridad por si la sala desapareció
+    if room not in ROOMS: return
+    
     channel_id = setup_discord_channel(room)
     if not channel_id: return
 
@@ -142,6 +155,7 @@ def process_discord_integration(room, data):
         "content": f"🔒 **GHOST_PACKET:** `{discord_cipher_text}`"
     })
 
+    # Backup cada 100 mensajes
     if ROOMS.get(room) and ROOMS[room]['msg_count'] >= 100:
         try:
             content = "\n".join([f"{m['user']}: {m['msg']}" for m in ROOMS[room]['history']])
@@ -152,10 +166,11 @@ def process_discord_integration(room, data):
                         data={"content": "📦 **BACKUP GENERADO (AES-256)**\nClave: `chats123`"},
                         files=files)
             
-            ROOMS[room]['msg_count'] = 0 
+            if room in ROOMS: ROOMS[room]['msg_count'] = 0 
         except Exception as e:
             print(f"Error en backup: {e}")
 
 if __name__ == '__main__':
+    # Render usa la variable PORT
     port = int(os.environ.get('PORT', 10000))
     socketio.run(app, host='0.0.0.0', port=port)
